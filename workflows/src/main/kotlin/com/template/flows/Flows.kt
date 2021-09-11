@@ -1,83 +1,103 @@
 package com.template.flows
 
 import co.paralleluniverse.fibers.Suspendable
+import com.template.contracts.DummyToDoCommand
+import com.template.states.ToDoState
 import net.corda.core.flows.*
-import net.corda.core.utilities.ProgressTracker
-import net.corda.core.flows.FinalityFlow
-
-import net.corda.core.flows.CollectSignaturesFlow
-
+import net.corda.core.node.services.Vault
+import net.corda.core.node.services.vault.QueryCriteria
 import net.corda.core.transactions.SignedTransaction
-
-import java.util.stream.Collectors
-
-import net.corda.core.flows.FlowSession
-
-import net.corda.core.identity.Party
-
-import com.template.contracts.TemplateContract
-
 import net.corda.core.transactions.TransactionBuilder
+import net.corda.core.utilities.ProgressTracker
+import org.jetbrains.annotations.NotNull
+import java.util.*
 
-import com.template.states.TemplateState
-import net.corda.core.contracts.requireThat
-import net.corda.core.identity.AbstractParty
 
-
-// *********
-// * Flows *
-// *********
-@InitiatingFlow
+// flow start CreateToDoFlow task: "Get some cheese"
+// flow start AssignToDoInitiator linearId: 3d3d3a7b-35bf-4b1d-83d7-9f10a9c98657 , assignedTo: PartyA
+// ******************
+// * Initiator flow *
+// ******************
 @StartableByRPC
-class Initiator(private val receiver: Party) : FlowLogic<SignedTransaction>() {
+class CreateToDoFlow(private val taskDescription: String) : FlowLogic<Void?>() {
     override val progressTracker = ProgressTracker()
 
     @Suspendable
-    override fun call(): SignedTransaction {
-        //Hello World message
-        val msg = "Hello-World"
-        val sender = ourIdentity
-
-        // Step 1. Get a reference to the notary service on our network and our key pair.
-        // Note: ongoing work to support multiple notary identities is still in progress.
+    @Throws(FlowException::class)
+    override fun call(): Void? {
+        val serviceHub = serviceHub
+        val me = ourIdentity
+        val ts = ToDoState(me, me, taskDescription)
+        println("Linear ID of state is " + ts.linearId)
         val notary = serviceHub.networkMapCache.notaryIdentities[0]
-
-        //Compose the State that carries the Hello World message
-        val output = TemplateState(msg, sender, receiver)
-
-        // Step 3. Create a new TransactionBuilder object.
-        val builder = TransactionBuilder(notary)
-                .addCommand(TemplateContract.Commands.Create(), listOf(sender.owningKey, receiver.owningKey))
-                .addOutputState(output)
-
-        // Step 4. Verify and sign it with our KeyPair.
-        builder.verify(serviceHub)
-        val ptx = serviceHub.signInitialTransaction(builder)
-
-
-        // Step 6. Collect the other party's signature using the SignTransactionFlow.
-        val otherParties: MutableList<Party> = output.participants.stream().map { el: AbstractParty? -> el as Party? }.collect(Collectors.toList())
-        otherParties.remove(ourIdentity)
-        val sessions = otherParties.stream().map { el: Party? -> initiateFlow(el!!) }.collect(Collectors.toList())
-
-        val stx = subFlow(CollectSignaturesFlow(ptx, sessions))
-
-        // Step 7. Assuming no exceptions, we can now finalise the transaction
-        return subFlow<SignedTransaction>(FinalityFlow(stx, sessions))
+        var tb = TransactionBuilder(notary)
+        tb = tb.addCommand(DummyToDoCommand(), me.owningKey) // at least one is required
+        tb = tb.addOutputState(ts)
+        val stx = serviceHub.signInitialTransaction(tb)
+        subFlow(FinalityFlow(stx, emptySet<FlowSession>()))
+        println("oi!!")
+        return null
     }
 }
 
-@InitiatedBy(Initiator::class)
-class Responder(val counterpartySession: FlowSession) : FlowLogic<SignedTransaction>() {
+@InitiatingFlow
+@StartableByRPC
+class AssignToDoInitiator(private val linearId: String, private val assignedTo: String): FlowLogic<Void?>() {
     @Suspendable
+    override fun call(): Void? {
+        val sb = serviceHub
+        val queryCriteria: QueryCriteria = QueryCriteria.LinearStateQueryCriteria(
+            null,
+            listOf(UUID.fromString(linearId))
+        )
+        val taskStatePage: Vault.Page<ToDoState> = sb.vaultService.queryBy(ToDoState::class.java, queryCriteria)
+        val states = taskStatePage.states
+        val sar = states[0]
+        val currentToDoState = sar.state.data
+        println("ToDoState => ${currentToDoState.taskDescription}")
+
+        val parties = sb.identityService.partiesFromName(assignedTo, true)
+        val assignedToParty = parties.iterator().next()
+
+        val newToDoState = currentToDoState.assign(assignedToParty)
+        val notary = sb.networkMapCache.notaryIdentities[0]
+
+        val myKey = ourIdentity.owningKey
+        val tb: TransactionBuilder = TransactionBuilder(notary).addInputState(sar)
+            .addOutputState(newToDoState)
+            .addCommand(
+                DummyToDoCommand(), myKey,
+                assignedToParty.owningKey
+            )
+
+        val assignedToSession = initiateFlow(assignedToParty)
+        val ptx = serviceHub.signInitialTransaction(tb)
+        val stx = subFlow(
+            CollectSignaturesFlow(
+                ptx,
+                setOf(assignedToSession)
+            )
+        )
+        subFlow(FinalityFlow(stx, listOf(assignedToSession)))
+
+        return null;
+    }
+
+}
+
+@InitiatedBy(AssignToDoInitiator::class)
+class AssignToDoResponder(private val counterpartySession: FlowSession) : FlowLogic<SignedTransaction?>() {
+    @Suspendable
+    @Throws(FlowException::class)
     override fun call(): SignedTransaction {
-        val signTransactionFlow = object : SignTransactionFlow(counterpartySession) {
-            override fun checkTransaction(stx: SignedTransaction) = requireThat {
-               //Addition checks
+        println("responder called")
+        val signTransactionFlow: SignTransactionFlow = object : SignTransactionFlow(counterpartySession) {
+            @Throws(FlowException::class)
+            override fun checkTransaction(@NotNull stx: SignedTransaction) {
+                println("check!!")
             }
         }
-        val txId = subFlow(signTransactionFlow).id
-        return subFlow(ReceiveFinalityFlow(counterpartySession, expectedTxId = txId))
+        val stx = subFlow(signTransactionFlow)
+        return subFlow(ReceiveFinalityFlow(counterpartySession, stx.id))
     }
 }
-
