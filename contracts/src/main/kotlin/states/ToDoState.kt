@@ -17,6 +17,7 @@ data class ToDoState(
     val assignedBy: Party,
     val assignedTo: Party,
     val taskDescription: String,
+    val isDone: Boolean = false,
     override val linearId: UniqueIdentifier = UniqueIdentifier()
 ) : ContractState, LinearState {
     fun assign(assignedTo: Party): ToDoState {
@@ -24,8 +25,13 @@ data class ToDoState(
             assignedBy,
             assignedTo,
             taskDescription,
+            false,
             linearId
         )
+    }
+
+    fun markAsDone(): ToDoState {
+        return ToDoState(assignedBy, assignedTo, taskDescription, true, linearId)
     }
 
     override val participants: List<AbstractParty>
